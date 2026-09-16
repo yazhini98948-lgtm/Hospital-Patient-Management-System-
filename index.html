@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}MediCare Dashboard{% endblock %}
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h2 class="fw-bold text-dark"><i class="bi bi-speedometer2 me-2"></i>Dashboard</h2>
+        <p class="text-muted">Overview of the hospital management system</p>
+    </div>
+</div>
+
+<div class="row g-4 mb-4" id="statsCards"></div>
+
+<div class="row g-4">
+    <div class="col-lg-8">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white">
+                <h5 class="mb-0 fw-semibold"><i class="bi bi-calendar-week me-2"></i>Upcoming Appointments</h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>Patient</th>
+                                <th>Doctor</th>
+                                <th>Date &amp; Time</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="upcomingAppointmentsBody">
+                            <tr><td colspan="4" class="text-center text-muted py-4">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-white">
+                <h5 class="mb-0 fw-semibold"><i class="bi bi-clipboard2-pulse me-2"></i>Recent Medical Records</h5>
+            </div>
+            <div class="card-body">
+                <div id="recentRecords">
+                    <div class="text-center text-muted py-4">Loading...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', async function () {
+    try {
+        const [doctorsRes, patientsRes, appointmentsRes, recordsRes] = await Promise.all([
+            fetch('/api/doctors'),
+            fetch('/api/patients'),
+            fetch('/api/appointments'),
+            fetch('/api/medical_records')
+        ]);
+        const doctors = await doctorsRes.json();
+        const patients = await patientsRes.json();
+        const appointments = await appointmentsRes.json();
+        const records = await recordsRes.json();
+
+        renderStats(doctors, patients, appointments, records);
+        renderUpcomingAppointments(appointments);
+        renderRecentRecords(records);
+    } catch (err) {
+        showToast('danger', 'Failed to load dashboard data');
+    }
+});
+
+function renderStats(doctors, patients, appointments, records) {
+    const counts = [
+        { label: 'Doctors', value: doctors.length, icon: 'bi-person-badge', color: 'bg-primary', link: '/doctors' },
+        { label: 'Patients', value: patients.length, icon: 'bi-people', color: 'bg-success', link: '/patients' },
+        { label: 'Appointments', value: appointments.length, icon: 'bi-calendar-check', color: 'bg-warning', link: '/appointments' },
+        { label: 'Medical Records', value: records.length, icon: 'bi-clipboard2-pulse', color: 'bg-info', link: '/medical_records' }
+    ];
+    document.getElementById('statsCards').innerHTML = counts.map(c => `
+        <div class="col-6 col-lg-3">
+            <a href="${c.link}" class="text-decoration-none">
+                <div class="card border-0 shadow-sm stat-card">
+                    <div class="card-body d-flex align-items-center">
+                        <div class="stat-icon ${c.color} me-3">
+                            <i class="bi ${c.icon}"></i>
+                        </div>
+                        <div>
+                            <h3 class="mb-0 fw-bold">${c.value}</h3>
+                            <span class="text-muted small">${c.label}</span>
+                        </div>
+                    </div>
+                </div>
+            </a>
+        </div>`).join('');
+}
+
+function renderUpcomingAppointments(appointments) {
+    const today = new Date().toISOString().split('T')[0];
+    const upcoming = appointments
+        .filter(a => a.date >= today && a.status === 'scheduled')
+        .sort((a, b) => a.date === b.date ? a.time.localeCompare(b.time) : a.date.localeCompare(b.date))
+        .slice(0, 8);
+
+    const body = document.getElementById('upcomingAppointmentsBody');
+    if (upcoming.length === 0) {
+        body.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">No upcoming appointments</td></tr>';
+        return;
+    }
+    body.innerHTML = upcoming.map(a => `
+        <tr>
+            <td><span class="fw-semibold">${a.patient_name || 'Patient #' + a.patient_id}</span></td>
+            <td>${a.doctor_name || 'Doctor #' + a.doctor_id}</td>
+            <td>${formatDate(a.date)} <span class="badge bg-light text-dark">${a.time}</span></td>
+            <td>${statusBadge(a.status)}</td>
+        </tr>`).join('');
+}
+
+function renderRecentRecords(records) {
+    const container = document.getElementById('recentRecords');
+    const recent = records.slice(0, 5);
+    if (recent.length === 0) {
+        container.innerHTML = '<div class="text-center text-muted py-4">No medical records yet</div>';
+        return;
+    }
+    container.innerHTML = recent.map(r => `
+        <div class="record-item mb-3">
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <div class="fw-semibold">${r.patient_name || 'Patient #' + r.patient_id}</div>
+                    <div class="text-muted small">${formatDate(r.record_date)}</div>
+                </div>
+                <span class="badge bg-danger-subtle text-danger">${r.diagnosis}</span>
+            </div>
+            <div class="text-muted small text-truncate mt-1">${r.prescription}</div>
+        </div>`).join('');
+}
+</script>
+{% endblock %}
