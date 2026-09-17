@@ -1,0 +1,43 @@
+const API = (() => {
+    async function request(url, method = "GET", body = null) {
+        const options = {
+            method: method,
+            headers: { "Content-Type": "application/json" },
+        };
+        if (body) {
+            options.body = JSON.stringify(body);
+        }
+        let response;
+        try {
+            response = await fetch(url, options);
+        } catch (err) {
+            const message =
+                window.location.protocol === "file:"
+                    ? "You opened this page as a file. Run `python app.py` and open http://127.0.0.1:5000/"
+                    : "Cannot reach the server. Is `python app.py` running? (http://127.0.0.1:5000)";
+            throw new Error(message);
+        }
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            const message = data.error || `Request failed (HTTP ${response.status})`;
+            throw new Error(message);
+        }
+        return data;
+    }
+
+    return {
+        list: (entity) => request(API_URLS[entity]),
+        get: (url) => request(url),
+        create: (url, body) => request(url, "POST", body),
+        update: (url, body) => request(url, "PUT", body),
+        remove: (url) => request(url, "DELETE"),
+        search: (entity, term, status) => {
+            let base = entity === "medical_records" ? "/api/medical-records" : `/api/${entity}`;
+            const params = new URLSearchParams();
+            if (term) params.set("search", term);
+            if (status) params.set("status", status);
+            const qs = params.toString();
+            return request(qs ? `${base}?${qs}` : base);
+        },
+    };
+})();

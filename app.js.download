@@ -1,0 +1,586 @@
+const API_URLS = {
+    doctors: "/api/doctors",
+    patients: "/api/patients",
+    appointments: "/api/appointments",
+    medical_records: "/api/medical-records",
+};
+
+const ENTITY_LABELS = {
+    doctors: "Doctor",
+    patients: "Patient",
+    appointments: "Appointment",
+    medical_records: "Medical Record",
+};
+
+let currentView = "dashboard";
+let entityModal = null;
+let deleteModal = null;
+let toastEl = null;
+let currentForm = null;
+let pendingDelete = null;
+let dataCache = {};
+
+// Defined first so any code path can use them regardless of script order.
+function escapeHtml(str) {
+    if (!str) return "";
+    const div = document.createElement("div");
+    div.textContent = String(str);
+    return div.innerHTML;
+}
+
+function showToast(message, type = "success") {
+    if (!toastEl) return;
+    toastEl.classList.remove("text-bg-success", "text-bg-danger");
+    toastEl.classList.add(type === "success" ? "text-bg-success" : "text-bg-danger");
+    document.getElementById("appToastMessage").textContent = message;
+    const toast = bootstrap.Toast.getOrCreateInstance(toastEl, { delay: 3500 });
+    toast.show();
+}
+
+// Initialize on page load
+document.addEventListener("DOMContentLoaded", () => {
+    toastEl = document.getElementById("appToast");
+
+    if (typeof API === "undefined" || typeof API_URLS === "undefined") {
+        showToast("Frontend scripts failed to load. Open this page via the server, not as a file.", "danger");
+        return;
+    }
+
+    entityModal = new bootstrap.Modal(document.getElementById("entityModal"));
+    deleteModal = new bootstrap.Modal(document.getElementById("deleteModal"));
+
+    document.querySelectorAll(".nav-link[data-entity]").forEach((link) => {
+        link.addEventListener("click", (e) => {
+            e.preventDefault();
+            switchView(link.dataset.entity);
+        });
+    });
+
+    document.getElementById("entityForm").addEventListener("submit", onFormSubmit);
+    document.getElementById("confirmDeleteBtn").addEventListener("click", onConfirmDelete);
+
+    setupSearch("doctors");
+    setupSearch("patients");
+    setupSearch("appointments");
+    setupSearch("medical_records");
+    document.getElementById("filter-status").addEventListener("change", () => loadView("appointments"));
+
+    switchView("dashboard");
+});
+
+function switchView(view) {
+    currentView = view;
+    document.querySelectorAll(".entity-view").forEach((el) => el.classList.add("d-none"));
+    document.getElementById(`view-${view}`).classList.remove("d-none");
+
+    document.querySelectorAll(".nav-link[data-entity]").forEach((link) => {
+        link.classList.toggle("active", link.dataset.entity === view);
+    });
+
+    loadView(view);
+}
+
+async function loadView(view) {
+    if (view === "dashboard") {
+        loadDashboard();
+        return;
+    }
+    const tbody = document.getElementById(`table-${view}`);
+    if (tbody) {
+        tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading...</td></tr>`;
+    }
+    try {
+        const searchInput = document.querySelector(`#search-${view}`);
+        const term = searchInput ? searchInput.value.trim() : "";
+        const status = view === "appointments" ? document.getElementById("filter-status").value : "";
+        const data = await API.search(view, term, status);
+        dataCache[view] = data;
+        renderTable(view, data);
+    } catch (err) {
+        renderTable(view, [], true);
+        showToast(err.message, "danger");
+    }
+}
+
+function setupSearch(view) {
+    const input = document.querySelector(`#search-${view}`);
+    if (!input) return;
+    let timer = null;
+    input.addEventListener("input", () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => loadView(view), 350);
+    });
+}
+
+// ---------- RENDERING ----------
+
+function renderTable(view, data, isError = false) {
+    const tbody = document.getElementById(`table-${view}`);
+    const emptyState = document.getElementById(`empty-${view}`);
+
+    tbody.innerHTML = "";
+    if (data.length === 0) {
+        if (isError) {
+            emptyState.querySelector("p").textContent = "Could not load data";
+            emptyState.querySelector("small").textContent = "Check that the server is running.";
+        } else {
+            emptyState.querySelector("p").textContent = `No ${view} found`;
+            emptyState.querySelector("small").textContent =
+                `Click "Add ${ENTITY_LABELS[view]}" to create the first record.`;
+        }
+        emptyState.classList.remove("d-none");
+        return;
+    }
+    emptyState.classList.add("d-none");
+
+    data.forEach((item) => {
+        tbody.insertAdjacentHTML("beforeend", buildRow(view, item));
+    });
+}
+
+function buildRow(view, item) {
+    switch (view) {
+        case "doctors":
+            return `
+                <tr>
+                    <td>${item.id}</td>
+                    <td><span class="fw-medium">${escapeHtml(item.name)}</span></td>
+                    <td><span class="badge text-bg-light border">${escapeHtml(item.specialization)}</span></td>
+                    <td>${escapeHtml(item.phone)}</td>
+                    <td>${escapeHtml(item.email)}</td>
+                    <td class="text-end">
+                        ${actionButtons("doctors", item.id)}
+                    </td>
+                </tr>`;
+        case "patients":
+            return `
+                <tr>
+                    <td>${item.id}</td>
+                    <td><span class="fw-medium">${escapeHtml(item.name)}</span></td>
+                    <td>${item.age}</td>
+                    <td>${escapeHtml(item.gender)}</td>
+                    <td>${bloodGroupBadge(item.blood_group)}</td>
+                    <td>${escapeHtml(item.phone)}</td>
+                    <td>${escapeHtml(item.city)}</td>
+                    <td class="text-end">
+                        ${actionButtons("patients", item.id)}
+                    </td>
+                </tr>`;
+        case "appointments":
+            return `
+                <tr>
+                    <td>${item.id}</td>
+                    <td><span class="fw-medium">${escapeHtml(item.patient_name || `Patient #${item.patient_id}`)}</span></td>
+                    <td>${escapeHtml(item.doctor_name || `Doctor #${item.doctor_id}`)}</td>
+                    <td>${escapeHtml(item.date)}</td>
+                    <td>${escapeHtml(item.time)}</td>
+                    <td>${statusBadge(item.status)}</td>
+                    <td class="text-end">
+                        ${actionButtons("appointments", item.id)}
+                    </td>
+                </tr>`;
+        case "medical_records":
+            return `
+                <tr>
+                    <td>${item.id}</td>
+                    <td><span class="fw-medium">${escapeHtml(item.patient_name || `Patient #${item.patient_id}`)}</span></td>
+                    <td>${escapeHtml(item.diagnosis)}</td>
+                    <td class="text-truncate" style="max-width: 180px;" title="${escapeHtml(item.prescription || '')}">${escapeHtml(item.prescription || "—")}</td>
+                    <td>${escapeHtml(item.date)}</td>
+                    <td class="text-end">
+                        ${actionButtons("medical_records", item.id)}
+                    </td>
+                </tr>`;
+        default:
+            return "";
+    }
+}
+
+function actionButtons(view, id) {
+    return `
+        <button class="btn btn-sm btn-outline-primary btn-icon me-1" onclick="editEntity('${view}', ${id})" title="Edit">
+            <i class="bi bi-pencil"></i>
+        </button>
+        <button class="btn btn-sm btn-outline-danger btn-icon" onclick="askDelete('${view}', ${id})" title="Delete">
+            <i class="bi bi-trash"></i>
+        </button>`;
+}
+
+function statusBadge(status) {
+    const cls = `status-${status.toLowerCase()}`;
+    return `<span class="badge ${cls}"><i class="bi bi-circle-fill me-1" style="font-size:0.5rem;"></i>${escapeHtml(status)}</span>`;
+}
+
+function bloodGroupBadge(bg) {
+    return `<span class="badge text-bg-danger bg-opacity-75 text-white">${escapeHtml(bg || "—")}</span>`;
+}
+
+// ---------- ADD / EDIT ----------
+
+function openEntityModal(view, item = null) {
+    currentForm = { view, item };
+    const title = item
+        ? `Edit ${ENTITY_LABELS[view]}`
+        : `Add ${ENTITY_LABELS[view]}`;
+    document.getElementById("entityModalTitle").textContent = title;
+    document.querySelector("#entityModal .modal-footer .btn-primary").textContent = item ? "Update" : "Save";
+
+    if (view === "appointments" || view === "medical_records") {
+        buildSelectOptions(view).then(({ patients, doctors }) => {
+            const fields = buildFormFields(view, item, { patients, doctors });
+            document.getElementById("entityModalBody").innerHTML = fields;
+            entityModal.show();
+            wireFormEvents(view);
+        });
+    } else {
+        document.getElementById("entityModalBody").innerHTML = buildFormFields(view, item);
+        entityModal.show();
+        wireFormEvents(view);
+    }
+}
+
+function wireFormEvents(view) {
+    if (view !== "patients") return;
+    const dobInput = document.getElementById("f-date_of_birth");
+    const ageInput = document.getElementById("f-age");
+    if (!dobInput || !ageInput) return;
+    const computeAge = () => {
+        if (!dobInput.value) return;
+        const dob = new Date(dobInput.value);
+        if (isNaN(dob)) return;
+        const now = new Date();
+        let age = now.getFullYear() - dob.getFullYear();
+        const m = now.getMonth() - dob.getMonth();
+        if (m < 0 || (m === 0 && now.getDate() < dob.getDate())) age--;
+        if (age >= 0 && age <= 150) ageInput.value = age;
+    };
+    dobInput.addEventListener("change", computeAge);
+    dobInput.addEventListener("input", computeAge);
+}
+
+function buildFormFields(view, item, refs = null) {
+    item = item || {};
+    const val = (key, fallback = "") => (item[key] !== undefined && item[key] !== null ? item[key] : fallback);
+    const today = new Date().toISOString().split("T")[0];
+
+    switch (view) {
+        case "doctors":
+            return `
+                ${textField("name", "Full Name", val("name"), "Enter doctor's full name", true)}
+                <div class="mb-3">
+                    <label class="form-label">Specialization</label>
+                    <select class="form-select" id="f-specialization" required>
+                        <option value="">Select specialization</option>
+                        ${SPECIALIZATIONS.map((s) => `<option value="${s}" ${val("specialization") === s ? "selected" : ""}>${s}</option>`).join("")}
+                    </select>
+                    <div class="invalid-feedback">Please select a specialization.</div>
+                </div>
+                ${textField("phone", "Phone", val("phone"), "e.g. 9876543210", true, "tel")}
+                ${textField("email", "Email", val("email"), "e.g. doctor@hospital.com", true, "email")}`;
+        case "patients":
+            return `
+                ${textField("name", "Full Name", val("name"), "Enter patient's full name", true)}
+                <div class="row g-3">
+                    <div class="col-sm-6">
+                        ${textField("date_of_birth", "Date of Birth", val("date_of_birth"), "", false, "date")}
+                    </div>
+                    <div class="col-sm-6">
+                        <div class="mb-3">
+                            <label class="form-label">Age <span class="text-danger">*</span></label>
+                            <input type="number" class="form-control" id="f-age" min="0" max="150" value="${val("age")}" placeholder="Auto from DOB" required>
+                            <div class="invalid-feedback">Age must be between 0 and 150.</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="row g-3">
+                    <div class="col-sm-6">
+                        <div class="mb-3">
+                            <label class="form-label">Gender <span class="text-danger">*</span></label>
+                            <select class="form-select" id="f-gender" required>
+                                <option value="">Select gender</option>
+                                <option value="Male" ${val("gender") === "Male" ? "selected" : ""}>Male</option>
+                                <option value="Female" ${val("gender") === "Female" ? "selected" : ""}>Female</option>
+                                <option value="Other" ${val("gender") === "Other" ? "selected" : ""}>Other</option>
+                            </select>
+                            <div class="invalid-feedback">Please select a gender.</div>
+                        </div>
+                    </div>
+                    <div class="col-sm-6">
+                        <div class="mb-3">
+                            <label class="form-label">Blood Group <span class="text-danger">*</span></label>
+                            <select class="form-select" id="f-blood_group" required>
+                                <option value="">Select blood group</option>
+                                ${BLOOD_GROUPS.map((bg) => `<option value="${bg}" ${val("blood_group") === bg ? "selected" : ""}>${bg}</option>`).join("")}
+                            </select>
+                            <div class="invalid-feedback">Please select a blood group.</div>
+                        </div>
+                    </div>
+                </div>
+                ${textField("phone", "Phone Number", val("phone"), "e.g. 9876543210", true, "tel")}
+                ${textField("email", "Email Address", val("email"), "e.g. patient@email.com", true, "email")}
+                <div class="mb-3">
+                    <label class="form-label">Address <span class="text-danger">*</span></label>
+                    <textarea class="form-control" id="f-address" rows="2" placeholder="Enter address" required>${val("address")}</textarea>
+                    <div class="invalid-feedback">Address is required.</div>
+                </div>
+                ${textField("city", "City", val("city"), "e.g. Chennai", true)}
+                <div class="row g-3">
+                    <div class="col-sm-6">
+                        ${textField("emergency_contact_name", "Emergency Contact Name", val("emergency_contact_name"), "e.g. John Doe", true)}
+                    </div>
+                    <div class="col-sm-6">
+                        ${textField("emergency_contact_number", "Emergency Contact Number", val("emergency_contact_number"), "e.g. 9876501234", true, "tel")}
+                    </div>
+                </div>`;
+        case "appointments":
+            return `
+                <div class="mb-3">
+                    <label class="form-label">Patient</label>
+                    <select class="form-select" id="f-patient_id" required>
+                        <option value="">Select patient</option>
+                        ${refs.patients.map((p) => `<option value="${p.id}" ${val("patient_id") === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
+                    </select>
+                    <div class="invalid-feedback">Please select a patient.</div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Doctor</label>
+                    <select class="form-select" id="f-doctor_id" required>
+                        <option value="">Select doctor</option>
+                        ${refs.doctors.map((d) => `<option value="${d.id}" ${val("doctor_id") === d.id ? "selected" : ""}>${escapeHtml(d.name)} (${escapeHtml(d.specialization)})</option>`).join("")}
+                    </select>
+                    <div class="invalid-feedback">Please select a doctor.</div>
+                </div>
+                <div class="row g-3">
+                    <div class="col-sm-7">
+                        ${textField("date", "Date", val("date"), "", true, "date", { min: today })}
+                    </div>
+                    <div class="col-sm-5">
+                        <div class="mb-3">
+                            <label class="form-label">Time</label>
+                            <input type="time" class="form-control" id="f-time" value="${val("time")}" required>
+                            <div class="invalid-feedback">Time is required.</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Status</label>
+                    <select class="form-select" id="f-status">
+                        <option value="Scheduled" ${val("status", "Scheduled") === "Scheduled" ? "selected" : ""}>Scheduled</option>
+                        <option value="Completed" ${val("status") === "Completed" ? "selected" : ""}>Completed</option>
+                        <option value="Cancelled" ${val("status") === "Cancelled" ? "selected" : ""}>Cancelled</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Reason</label>
+                    <textarea class="form-control" id="f-reason" rows="2" placeholder="Reason for visit (optional)">${val("reason")}</textarea>
+                </div>`;
+        case "medical_records":
+            return `
+                <div class="mb-3">
+                    <label class="form-label">Patient</label>
+                    <select class="form-select" id="f-patient_id" required>
+                        <option value="">Select patient</option>
+                        ${refs.patients.map((p) => `<option value="${p.id}" ${val("patient_id") === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
+                    </select>
+                    <div class="invalid-feedback">Please select a patient.</div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Diagnosis</label>
+                    <input type="text" class="form-control" id="f-diagnosis" value="${val("diagnosis")}" placeholder="e.g. Influenza" required>
+                    <div class="invalid-feedback">Diagnosis is required.</div>
+                </div>
+                ${textField("date", "Record Date", val("date", today), "", true, "date", { max: today })}
+                <div class="mb-3">
+                    <label class="form-label">Prescription</label>
+                    <textarea class="form-control" id="f-prescription" rows="2" placeholder="e.g. Paracetamol 500mg twice daily">${val("prescription")}</textarea>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Notes</label>
+                    <textarea class="form-control" id="f-notes" rows="2" placeholder="Additional notes (optional)">${val("notes")}</textarea>
+                </div>`;
+        default:
+            return "";
+    }
+}
+
+function textField(id, label, value, placeholder, required = false, type = "text", attrs = {}) {
+    const extra = Object.entries(attrs)
+        .map(([k, v]) => `${k}="${escapeHtml(v)}"`)
+        .join(" ");
+    return `
+        <div class="mb-3">
+            <label class="form-label">${label}${required ? ' <span class="text-danger">*</span>' : ""}</label>
+            <input type="${type}" class="form-control" id="f-${id}" value="${escapeHtml(value)}" placeholder="${placeholder}" ${required ? "required" : ""} ${extra}>
+            <div class="invalid-feedback">${label} is required.</div>
+        </div>`;
+}
+
+async function buildSelectOptions(view) {
+    const [patients, doctors] = await Promise.all([
+        API.list("patients").catch(() => []),
+        API.list("doctors").catch(() => []),
+    ]);
+    return { patients, doctors };
+}
+
+function editEntity(view, id) {
+    const item = dataCache[view]?.find((r) => r.id === id);
+    if (!item) {
+        API.get(`${API_URLS[view]}/${id}`)
+            .then((data) => openEntityModal(view, data))
+            .catch((err) => showToast(err.message, "danger"));
+        return;
+    }
+    openEntityModal(view, item);
+}
+
+async function onFormSubmit(e) {
+    e.preventDefault();
+    if (!currentForm) return;
+
+    const form = e.target;
+    if (!form.checkValidity()) {
+        form.classList.add("was-validated");
+        return;
+    }
+    form.classList.remove("was-validated");
+
+    const { view, item } = currentForm;
+    const id = item ? item.id : null;
+    const url = id ? `${API_URLS[view]}/${id}` : API_URLS[view];
+
+    try {
+        const payload = buildPayload(view);
+        if (id) {
+            await API.update(url, payload);
+            showToast(`${ENTITY_LABELS[view]} updated successfully`, "success");
+        } else {
+            await API.create(url, payload);
+            showToast(`${ENTITY_LABELS[view]} added successfully`, "success");
+        }
+        entityModal.hide();
+        form.reset();
+        await loadView(view);
+        if (view === "appointments" || view === "medical_records") loadDashboard();
+    } catch (err) {
+        showToast(err.message, "danger");
+    }
+}
+
+function buildPayload(view) {
+    const g = (vid) => document.getElementById(`f-${vid}`).value.trim();
+    switch (view) {
+        case "doctors":
+            return { name: g("name"), specialization: g("specialization"), phone: g("phone"), email: g("email") };
+        case "patients":
+            return { name: g("name"), age: g("age"), date_of_birth: g("date_of_birth"), gender: g("gender"), blood_group: g("blood_group"), phone: g("phone"), email: g("email"), address: g("address"), city: g("city"), emergency_contact_name: g("emergency_contact_name"), emergency_contact_number: g("emergency_contact_number") };
+        case "appointments":
+            return { patient_id: g("patient_id"), doctor_id: g("doctor_id"), date: g("date"), time: g("time"), status: g("status"), reason: g("reason") };
+        case "medical_records":
+            return { patient_id: g("patient_id"), diagnosis: g("diagnosis"), prescription: g("prescription"), notes: g("notes"), date: g("date") };
+        default:
+            return {};
+    }
+}
+
+// ---------- DELETE ----------
+
+function askDelete(view, id) {
+    const item = dataCache[view]?.find((r) => r.id === id);
+    const label = item
+        ? item.name || item.patient_name || item.diagnosis || `#${id}`
+        : `#${id}`;
+    document.getElementById("deleteModalMessage").textContent =
+        `Delete ${ENTITY_LABELS[view].toLowerCase()} "${label}"? This cannot be undone.`;
+    pendingDelete = { view, id };
+    deleteModal.show();
+}
+
+async function onConfirmDelete() {
+    if (!pendingDelete) return;
+    const { view, id } = pendingDelete;
+    try {
+        await API.remove(`${API_URLS[view]}/${id}`);
+        showToast(`${ENTITY_LABELS[view]} deleted`, "success");
+        deleteModal.hide();
+        await loadView(view);
+        loadDashboard();
+    } catch (err) {
+        showToast(err.message, "danger");
+        deleteModal.hide();
+    }
+    pendingDelete = null;
+}
+
+// ---------- DASHBOARD ----------
+
+async function loadDashboard() {
+    try {
+        const [doctors, patients, appointments, records] = await Promise.all([
+            API.list("doctors"),
+            API.list("patients"),
+            API.list("appointments"),
+            API.list("medical_records"),
+        ]);
+        document.getElementById("stat-doctors").textContent = doctors.length;
+        document.getElementById("stat-patients").textContent = patients.length;
+        document.getElementById("stat-appointments").textContent = appointments.length;
+        document.getElementById("stat-records").textContent = records.length;
+
+        const sortedAppts = [...appointments]
+            .filter((a) => a.status === "Scheduled")
+            .sort((a, b) => (a.date + a.time < b.date + b.time ? -1 : 1));
+        renderDashboardAppointments(sortedAppts.slice(0, 5));
+
+        const sortedRecords = [...records].sort((a, b) => (a.date < b.date ? 1 : -1));
+        renderDashboardRecords(sortedRecords.slice(0, 5));
+    } catch (err) {
+        showToast(err.message, "danger");
+    }
+}
+
+function renderDashboardAppointments(appts) {
+    const tbody = document.querySelector("#dashboard-appointments tbody");
+    if (appts.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="5" class="text-center text-muted py-4">No upcoming appointments</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = appts
+        .map(
+            (a) => `
+            <tr>
+                <td><span class="fw-medium">${escapeHtml(a.patient_name)}</span></td>
+                <td>${escapeHtml(a.doctor_name)}</td>
+                <td>${escapeHtml(a.date)}</td>
+                <td>${escapeHtml(a.time)}</td>
+                <td>${statusBadge(a.status)}</td>
+            </tr>`
+        )
+        .join("");
+}
+
+function renderDashboardRecords(records) {
+    const tbody = document.querySelector("#dashboard-records tbody");
+    if (records.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="3" class="text-center text-muted py-4">No medical records yet</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = records
+        .map(
+            (r) => `
+            <tr>
+                <td><span class="fw-medium">${escapeHtml(r.patient_name)}</span></td>
+                <td>${escapeHtml(r.diagnosis)}</td>
+                <td>${escapeHtml(r.date)}</td>
+            </tr>`
+        )
+        .join("");
+}
+
+const SPECIALIZATIONS = [
+    "Cardiology", "Dermatology", "Neurology", "Orthopedics",
+    "Pediatrics", "Psychiatry", "Gynecology", "Oncology",
+    "Radiology", "General Medicine", "Ophthalmology", "Dentistry",
+];
+
+const BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"];
